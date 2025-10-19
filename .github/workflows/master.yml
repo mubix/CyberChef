@@ -4,55 +4,86 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - master
+      - master
+
+# Keep perms minimal; bump to write only for the gh-pages publish step
+permissions:
+  contents: read
+
+# Auto-cancel older runs on rapid pushes to master
+concurrency:
+  group: master-${{ github.workflow }}
+  cancel-in-progress: true
 
 jobs:
   main:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Set node version
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18.x'
+      # Install Chrome BEFORE npm ci so the chromedriver npm pkg can auto-match
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
 
-    - name: Install
-      run: |
-        export DETECT_CHROMEDRIVER_VERSION=true
-        npm install
-        npm run setheapsize
+      - name: Set Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
 
-    - name: Lint
-      run: npx grunt lint
+      - name: Install
+        env:
+          DETECT_CHROMEDRIVER_VERSION: true
+        run: |
+          npm ci --prefer-offline --no-audit --fund=false
+          npm run setheapsize
 
-    - name: Unit Tests
-      run: |
-        npm test
-        npm run testnodeconsumer
+      - name: Lint
+        run: npx grunt lint
 
-    - name: Production Build
-      if: success()
-      run: npx grunt prod --msg="Version 10 is here! Read about the new features <a href='https://github.com/gchq/CyberChef/wiki/Character-encoding,-EOL-separators,-and-editor-features'>here</a>"
+      - name: Unit Tests
+        run: |
+          npm test
+          npm run testnodeconsumer
 
-    - name: Generate sitemap
-      run: npx grunt exec:sitemap
+      - name: Production Build
+        if: success()
+        run: >
+          npx grunt prod
+          --msg="Version 10 is here! Read about the new features
+          <a href='https://github.com/gchq/CyberChef/wiki/Character-encoding,-EOL-separators,-and-editor-features'>here</a>"
 
-    - name: UI Tests
-      if: success()
-      run: |
-        sudo apt-get install xvfb
-        xvfb-run --server-args="-screen 0 1200x800x24" npx grunt testui
+      - name: Generate sitemap
+        run: npx grunt exec:sitemap
 
-    - name: Prepare for GitHub Pages
-      if: success()
-      run: npx grunt copy:ghPages
+      # Use true headless Chrome; no Xvfb needed
+      - name: UI Tests (headless)
+        if: success()
+        env:
+          CHROME_ARGS: "--headless=new --no-sandbox --disable-dev-shm-usage"
+        run: npx grunt testui
 
-    - name: Deploy to GitHub Pages
-      if: success() && github.ref == 'refs/heads/master'
-      uses: crazy-max/ghaction-github-pages@v3
-      with:
-        target_branch: gh-pages
-        build_dir: ./build/prod
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Optional: dump versions if UI tests fail for faster triage
+      - name: Debug browser versions on failure
+        if: failure()
+        run: |
+          google-chrome --version || true
+          ./node_modules/.bin/chromedriver --version || chromedriver --version || true
+
+      - name: Prepare for GitHub Pages
+        if: success()
+        run: npx grunt copy:ghPages
+
+      - name: Deploy to GitHub Pages
+        if: success() && github.ref == 'refs/heads/master'
+        uses: crazy-max/ghaction-github-pages@v3
+        with:
+          target_branch: gh-pages
+          build_dir: ./build/prod
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        permissions:
+          contents: write
