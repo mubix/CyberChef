@@ -1,10 +1,15 @@
-name: "Releases"
+name: Releases
 
 on:
   workflow_dispatch:
   push:
     tags:
       - 'v*'
+
+# Minimal global permissions; raise only where needed
+permissions:
+  contents: read
+  packages: read
 
 env:
   REGISTRY: ghcr.io
@@ -13,27 +18,33 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  main:
-    runs-on: ubuntu-latest
+  # 1) Test matrix on x64 and arm64 (no publishing here)
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      # Install Chrome first so chromedriver can auto-detect version during npm ci
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
 
-      - name: Set node version
-        uses: actions/setup-node@v3
+      - name: Set Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '18.x'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
 
-      - name: Install
+      - name: Install deps
         env:
           DETECT_CHROMEDRIVER_VERSION: true
         run: |
-          npm ci
+          npm ci --prefer-offline --no-audit --fund=false
           npm run setheapsize
 
       - name: Lint
@@ -47,18 +58,32 @@ jobs:
       - name: Production Build
         run: npx grunt prod
 
-      - name: UI Tests
+      - name: UI Tests (headless Chrome; no Xvfb)
         env:
-          # Helpful in CI; your Nightwatch config can read and append these
           CHROME_ARGS: "--headless=new --no-sandbox --disable-dev-shm-usage"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
-          xvfb-run --server-args="-screen 0 1200x800x24" npx grunt testui
+          npx grunt testui
+        # Optional debug on failures:
+      - name: Debug versions on failure
+        if: failure()
+        run: |
+          google-chrome --version || true
+          chromedriver --version || true
+
+  # 2) Build & publish multi-arch image once, then upload release assets & npm
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    # Raise permissions only for this job
+    permissions:
+      contents: write     # for release uploads
+      packages: write     # for GHCR push
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Image Metadata
         id: image-metadata
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -66,7 +91,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{version}}
 
-      - name: Production Image Build
+      # Keep buildah; multi-arch as before
+      - name: Production Image Build (multi-arch)
         id: build-image
         uses: redhat-actions/buildah-build@v2
         with:
@@ -80,6 +106,7 @@ jobs:
             --ulimit nofile=10000
 
       - name: Publish to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: redhat-actions/push-to-registry@v2
         with:
           image: ${{ steps.build-image.outputs.image }}
@@ -89,7 +116,7 @@ jobs:
           password: ${{ env.REGISTRY_PASSWORD }}
 
       - name: Upload Release Assets
-        id: upload-release-assets
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -100,96 +127,7 @@ jobs:
           body: "See the [CHANGELOG](https://github.com/gchq/CyberChef/blob/master/CHANGELOG.md) and [commit messages](https://github.com/gchq/CyberChef/commits/master) for details."
 
       - name: Publish to NPM
-        uses: JS-DevTools/npm-publish@v1
-        with:
-          token: ${{ secrets.NPM_TOKEN }}
-
-  arm:
-    # Arm64 GitHub-hosted runner
-    runs-on: ubuntu-24.04-arm   # or ubuntu-22.04-arm
-    steps:
-      - uses: actions/checkout@v3
-
-      # Install Chrome first so chromedriver can auto-detect version during npm ci
-      - name: Setup Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-
-      - name: Set node version
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18.x'
-
-      - name: Install
-        env:
-          DETECT_CHROMEDRIVER_VERSION: true
-        run: |
-          npm ci
-          npm run setheapsize
-
-      - name: Lint
-        run: npx grunt lint
-
-      - name: Unit Tests
-        run: |
-          npm test
-          npm run testnodeconsumer
-
-      - name: Production Build
-        run: npx grunt prod
-
-      - name: UI Tests
-        env:
-          CHROME_ARGS: "--headless=new --no-sandbox --disable-dev-shm-usage"
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
-          xvfb-run --server-args="-screen 0 1200x800x24" npx grunt testui
-
-      - name: Image Metadata
-        id: image-metadata
-        uses: docker/metadata-action@v4
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{major}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{version}}
-
-      - name: Production Image Build (ARM64 only)
-        id: build-image
-        uses: redhat-actions/buildah-build@v2
-        with:
-          tags: ${{ steps.image-metadata.outputs.tags }}
-          labels: ${{ steps.image-metadata.outputs.labels }}
-          containerfiles: ./Dockerfile
-          platforms: linux/arm64
-          oci: true
-          layers: true
-          extra-args: |
-            --ulimit nofile=10000
-
-      - name: Publish to GHCR
-        uses: redhat-actions/push-to-registry@v2
-        with:
-          image: ${{ steps.build-image.outputs.image }}
-          tags: ${{ steps.build-image.outputs.tags }}
-          registry: ${{ env.REGISTRY }}
-          username: ${{ env.REGISTRY_USER }}
-          password: ${{ env.REGISTRY_PASSWORD }}
-
-      - name: Upload Release Assets
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: build/prod/*.zip
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
-          body: "See the [CHANGELOG](https://github.com/gchq/CyberChef/blob/master/CHANGELOG.md) and [commit messages](https://github.com/gchq/CyberChef/commits/master) for details."
-
-      - name: Publish to NPM
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: JS-DevTools/npm-publish@v1
         with:
           token: ${{ secrets.NPM_TOKEN }}
