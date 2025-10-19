@@ -94,3 +94,83 @@ jobs:
       uses: JS-DevTools/npm-publish@v1
       with:
         token: ${{ secrets.NPM_TOKEN }}
+  arm:
+    # Arm64 GitHub-hosted runner
+    runs-on: ubuntu-24.04-arm   # or ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set node version
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+
+      - name: Install
+        run: |
+          export DETECT_CHROMEDRIVER_VERSION=true
+          npm ci
+          npm run setheapsize
+
+      - name: Lint
+        run: npx grunt lint
+
+      - name: Unit Tests
+        run: |
+          npm test
+          npm run testnodeconsumer
+
+      - name: Production Build
+        run: npx grunt prod
+
+      - name: UI Tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          xvfb-run --server-args="-screen 0 1200x800x24" npx grunt testui
+
+      - name: Image Metadata
+        id: image-metadata
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}}
+
+      - name: Production Image Build (ARM64 only)
+        id: build-image
+        uses: redhat-actions/buildah-build@v2
+        with:
+          tags: ${{ steps.image-metadata.outputs.tags }}
+          labels: ${{ steps.image-metadata.outputs.labels }}
+          containerfiles: ./Dockerfile
+          platforms: linux/arm64     # <— ARM64 only
+          oci: true
+          layers: true
+          extra-args: |
+            --ulimit nofile=10000
+
+      - name: Publish to GHCR
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build-image.outputs.image }}
+          tags: ${{ steps.build-image.outputs.tags }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
+      - name: Upload Release Assets
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: build/prod/*.zip
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
+          body: "See the [CHANGELOG](https://github.com/gchq/CyberChef/blob/master/CHANGELOG.md) and [commit messages](https://github.com/gchq/CyberChef/commits/master) for details."
+
+      - name: Publish to NPM
+        uses: JS-DevTools/npm-publish@v1
+        with:
+          token: ${{ secrets.NPM_TOKEN }}
