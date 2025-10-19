@@ -6,7 +6,7 @@ on:
     branches:
       - master
 
-# Keep perms minimal; bump to write only for the gh-pages publish step
+# Keep perms minimal globally
 permissions:
   contents: read
 
@@ -18,6 +18,10 @@ concurrency:
 jobs:
   main:
     runs-on: ubuntu-latest
+    # Override perms for this job so the gh-pages deploy can push commits
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -85,5 +89,3 @@ jobs:
           build_dir: ./build/prod
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        permissions:
-          contents: write
